@@ -1,16 +1,20 @@
 import threading
 import time
 import sys
+import os
 import socket
 import struct
 import json
-import log
-import watcher
+from api import log
+from api import watcher
 
-api = None
+api_class = None
+REGISTER_DELAY = 1
 
 class APIThread(object):
-    def __init__(self, host=None, port=None, key=None, timeout=3, onConnect=None, callBack=None, debug=False):
+    def __init__(self, host=None, port=None, key=None, name=None, timeout=3, onConnect=None, callBack=None, debug=False):
+        global api_class
+        api_class = self
         self.log = log.LogThread()
         self.unix_sockets = ['/tmp/sh.socket', '/home/sh2/sh.sock']
         self.connected = False
@@ -18,17 +22,21 @@ class APIThread(object):
         self.host = host
         self.port = port if port else 2040
         self.key = key
+        self.name = name
         self.dbg = debug
         self.timeout = timeout
         self.cb = [callBack] if callBack else []
         self.connect_cb = [onConnect] if onConnect else []
         self.connected = False
+        self.addrs = {}
+        self.addrkeys = {}
+        self.devs = []
+        self.tregdevs = 0
 
         self.thread = threading.Thread(target=self.run, args=())
         self.thread.daemon = True
         self.thread.start()
         watcher.threads['API'] = self.thread
-        api = self
 
     def debug(self, d):
         self.dbg = d
@@ -52,6 +60,43 @@ class APIThread(object):
                 self.log.log("Error sending data. result: {}".format(ret), "RED")
                 return False
         return True
+
+    def register(self, devinfo, c):
+        if 'addr-key' in devinfo:
+            self.addrkeys[devinfo['addr-key']] = c
+            found = False
+            for i in range(len(self.devs)):
+                if 'addr-key' in self.devs[i] and self.devs[i]['addr-key'] == devinfo['addr-key']:
+                    found = True
+                    self.devs[i] = devinfo
+                    if self.dbg:
+                        self.log.log("Updating device info")
+                    break
+            if not found:
+                if self.dbg:
+                    self.log.log("Registering new device {}".format(devinfo))
+                self.devs.append(devinfo)
+        elif 'addr' in devinfo:
+            self.addrs[devinfo['addr']] = c
+            found = False
+            for i in range(len(self.devs)):
+                if 'addr' in self.devs[i] and self.devs[i]['addr'] == devinfo['addr']:
+                    found = True
+                    self.devs[i] = devinfo
+                    if self.dbg:
+                        self.log.log("Updating device info")
+                    break
+            if not found:
+                if self.dbg:
+                    self.log.log("Registering new device {}".format(devinfo))
+                self.devs.append(devinfo)
+        self.tregdevs = time.time() + REGISTER_DELAY
+
+    def register_commit(self):
+        if self.devs != []:
+            self.log.log("Commiting registration of {} devices".format(len(self.devs)))
+            self.request('she-register-pnp', {"pnp": self.devs})
+        self.tregdevs = 0
 
     def request(self, type, param=None, auth=0):
         if not self.sock or (not auth and not self.connected):
@@ -95,7 +140,8 @@ class APIThread(object):
             #self.log.log("size = {}".format(size))
             try:
                 if data[:5] == b'<?xml':
-                    res = data
+                    self.xmlReceived(data)
+                    return False, None
                 elif data[:6] == b'-JSON-':
                     res = json.loads(data[6:].decode())
                 else:
@@ -112,6 +158,31 @@ class APIThread(object):
 
         return True, None
 
+    def xmlReceived(self, xml):
+        self.log.log("XML Received")
+
+    def onReceive(self, data):
+        if 'event' in data and data['event']=='she-device-is-created':
+            if 'addr-key' in data and data['addr-key'] in self.addrkeys:
+                self.addrkeys[data['addr-key']]._onCreate(data)
+            elif 'addr' in data and data['addr'] in self.addrs:
+                self.addrs[data['addr']]._onCreate(data)
+        elif 'event' in data and data['event']=='she-device-status' and 'status' in data:
+            if type(data['status']).__name__ == 'str' and len(data['status'])>3 and data['status'][:2]=='0x':
+                status = bytes().fromhex(data['status'][2:])
+            else:
+                status = data['status']
+            if 'addr-key' in data and data['addr-key'] in self.addrkeys:
+                self.addrkeys[data['addr-key']]._onStatus(status)
+            elif 'addr' in data and data['addr'] in self.addrs:
+                self.addrs[data['addr']]._onStatus(status)
+
+        if self.cb!=[]:
+            for cb in self.cb:
+                ret = cb(js)
+                if type(ret).__name__ == 'dict':
+                    self.send(ret)
+
     def connect(self):
         if self.sock:
             del self.sock
@@ -120,7 +191,7 @@ class APIThread(object):
             host = self.host
         else:
             for i in self.unix_sockets:
-                if os.file_exists(i):
+                if os.path.exists(i):
                     host = i
                     break
         self.log.log("Connecting to {}".format(host), 'BLUE')
@@ -130,6 +201,9 @@ class APIThread(object):
             try:
                 self.sock.connect(host)
                 self.connected = True
+                self.log.log('API connected', 'GREEN')
+                if self.name:
+                    self.request('setup', {"appId": self.name})
                 return True
             except Exception as e:
                 self.log.log("API: Connect error: {}".format(e))
@@ -157,6 +231,8 @@ class APIThread(object):
                 if 'result' in js and js['result'] == 'success':
                     self.log.log('API connected and authorized', 'GREEN')
                     self.connected = True
+                    if self.name:
+                        self.request('setup', {"appId": self.name})
                     return True
                 else:
                     self.log.log('API: auth response error: {}'.format(js), 'GREEN')
@@ -178,30 +254,28 @@ class APIThread(object):
                     continue
                 else:
                     # call connect callbacks
+                    self.register_commit()
                     for cb in self.connect_cb:
                         cb()
             js = None
             while True:
+                if self.tregdevs and (self.tregdevs<time.time() or (self.tregdevs-REGISTER_DELAY-1)>time.time()):
+                     self.register_commit()
                 try:
                     st, js = self.read()
                     if not st:
                         self.connected = False
                         break
                 except socket.timeout:
-                        if self.dbg:
-                            self.log.log('timeout')
+                        #if self.dbg:
+                        #    self.log.log('timeout')
                         continue
                 except Exception as err:
                     st = False
                     self.log.log("Error reading packet. disconnecting. error: {}".format(err), 'RED')
                     self.connected = False
                     break
-                if self.cb!=[] and st and js:
-                    for cb in self.cb:
-                        ret = cb(js)
-                        if type(ret).__name__ == 'dict':
-                            self.send(ret)
-                        elif ret == True:
-                            break
+                if st and js:
+                    self.onReceive(js)
                 else:
                     time.sleep(0.01)

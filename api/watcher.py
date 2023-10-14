@@ -1,16 +1,19 @@
 import threading
-import log
+from api import log
+import time
+import sys
+import os
 
 threads = {}
 
 def run():
-    log = log.LogThread()
+    l = log.LogThread()
     while True:
         for k,v in threads.items():
             if not v.is_alive():
-                log.log("{} thread is dead, exiting".format(k), 'RED')
+                l.log("{} thread is dead, exiting".format(k), 'RED')
                 time.sleep(1)
-                exit(1)
+                os._exit(1)
         time.sleep(1)
 
 thread = threading.Thread(target=run, args=())

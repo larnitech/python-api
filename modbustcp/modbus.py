@@ -918,6 +918,11 @@ class ModbusClient:
         print(label)
         print(msg)
 
+try:
+    from api import report
+    report.sendReport("ltplugin-modbus.service")
+except Exception as e:
+    print("Error sending report: {}".format(e))
 
 config = open("/home/sh2/plugins/shsp-modbus-tcp-args.txt", 'r').read()
 a = None

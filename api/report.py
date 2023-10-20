@@ -37,6 +37,6 @@ def hourlyReport(fname):
                 if 'Serial' in l:
                     SN = l[-8:]
             print("Serial: {}".format(SN))
-            content = "Serial: {}\n".format(SN)+open(fname, "r").read(8192)
-            r = requests.post('https://repo.larnitech.com/serversLogs/crash.php?name='+name, data=content.encode('utf-8'), headers={'Content-Type': 'text/html', 'Accept-Charset': 'UTF-8'})
+            content = "Serial: {}\n".format(SN)+open(fname, "r").read(65536)
+            r = requests.post('https://repo.larnitech.com/serversLogs/crash.php?name=crashes', data=content.encode('utf-8'), headers={'Content-Type': 'text/html', 'Accept-Charset': 'UTF-8'})
             os.remove(fname)

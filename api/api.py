@@ -184,6 +184,7 @@ class APIThread(object):
                     self.send(ret)
 
     def connect(self):
+        host = None
         if self.sock:
             del self.sock
             self.sock = None
@@ -194,6 +195,9 @@ class APIThread(object):
                 if os.path.exists(i):
                     host = i
                     break
+            if not host:
+                self.log.log("Unix sockets dose not exists", 'RED')
+                return False
         self.log.log("Connecting to {}".format(host), 'BLUE')
         if host[0]=='/': # unix socket
             self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

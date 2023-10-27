@@ -646,11 +646,20 @@ class ModbusClient:
 
     def onStatus(self, data):
         self.log.log("MB: Got status: {}".format(data))
+        if len(data)<4:
+            self.log.log("Incorrect request. too short", "RED")
+            return
         if data[-2:] == b'\xcc\x16':
             data = data[:-2]
-        ret = self._req_pdu(data)
-        self.log.log("Returned: {}".format(ret))
-        self.dev.setStatus(ret+b'\xcc\x16')
+        try:
+            ret = self._req_pdu(data)
+            self.log.log("Returned: {}".format(ret))
+            self.dev.setStatus(ret+b'\xcc\x16')
+        except Exception as err:
+            self.log.log("Exception: {}".format(err), "RED")
+            self.log.log("Closing connection", "YELLOW")
+            if self.is_open:
+                self.close()
 
     def open(self):
         """Connect to modbus server (open TCP connection).

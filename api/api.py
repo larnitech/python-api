@@ -42,7 +42,7 @@ class APIThread(object):
         self.dbg = d
 
     def send(self, js):
-        d = b'-JSON-' + json.dumps(js).encode()
+        d = b'-JSON-' + json.dumps(js, ensure_ascii=False).encode('utf-8')
         if self.dbg:
             self.log.log("API sending: {}".format(d))
         data = struct.pack("I", len(d)) + d;
@@ -179,7 +179,7 @@ class APIThread(object):
 
         if self.cb!=[]:
             for cb in self.cb:
-                ret = cb(js)
+                ret = cb(data)
                 if type(ret).__name__ == 'dict':
                     self.send(ret)
 

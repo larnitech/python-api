@@ -32,6 +32,9 @@ class APIThread(object):
         self.addrkeys = {}
         self.devs = []
         self.tregdevs = 0
+        self.subs = []
+        self.tsubs = 0
+        self.subsDevs = {}
 
         self.thread = threading.Thread(target=self.run, args=())
         self.thread.daemon = True
@@ -90,7 +93,18 @@ class APIThread(object):
                 if self.dbg:
                     self.log.log("Registering new device {}".format(devinfo))
                 self.devs.append(devinfo)
-        self.tregdevs = time.time() + REGISTER_DELAY
+        self.tregdevs = time.monotonic() + REGISTER_DELAY
+
+    def subscribe(self, addr, c, delay=1):
+        if self.subs == []:
+            self.tsubs = time.monotonic()+delay
+        self.subs.append(addr)
+        self.subsDevs[addr] = c
+
+    def subscribe_commit(self):
+        self.request('status-subscribe', {"status":"detailed", 'addr':self.subs})
+        self.subs = []
+        self.tsubs = 0
 
     def register_commit(self):
         if self.devs != []:
@@ -176,6 +190,10 @@ class APIThread(object):
                 self.addrkeys[data['addr-key']]._onStatus(status)
             elif 'addr' in data and data['addr'] in self.addrs:
                 self.addrs[data['addr']]._onStatus(status)
+        elif self.subsDevs and (('response' in data and data['response'] == 'status-subscribe') or ('event' in data and data['event'] == 'statuses')) and 'devices' in data:
+            for d in data['devices']:
+                if 'addr' in d and d['addr'] in self.subsDevs:
+                    self.subsDevs[d['addr']]._onStatus(d)
 
         if self.cb!=[]:
             for cb in self.cb:
@@ -263,8 +281,10 @@ class APIThread(object):
                         cb()
             js = None
             while True:
-                if self.tregdevs and (self.tregdevs<time.time() or (self.tregdevs-REGISTER_DELAY-1)>time.time()):
+                if self.tregdevs and self.tregdevs<time.monotonic():
                      self.register_commit()
+                if self.tsubs and self.tsubs<time.monotonic():
+                     self.subscribe_commit()
                 try:
                     st, js = self.read()
                     if not st:

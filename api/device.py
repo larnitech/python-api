@@ -23,14 +23,16 @@ class device(object):
             self.thread.start()
             watcher.threads['dev-{}-{}'.format(addrkey, addr)] = self.thread
         self.api.setConnectCallback(self._onConnect)
+
+    def _onConnect(self):
         if self.create!={}:
             if self.addrkey:
                 self.create['addr-key'] = self.addrkey
             elif self.addr:
                 self.create['addr'] = self.addr
             self.api.register(self.create, self)
-
-    def _onConnect(self):
+        else:
+            self.api.subscribe(self.addr, self)
         self.onConnect()
 
     def onConnect(self):
@@ -63,10 +65,13 @@ class device(object):
         self.log.log("Sending status: {}".format(data))
         if type(data).__name__ == 'bytes':
             data = '0x'+data.hex()
-        if self.addrkey:
-            self.api.request('she-device-status', {"addr-key": self.addrkey, "status": data})
-        elif self.addr:
-            self.api.request('she-device-status', {"addr": self.addr, "status": data})
+        if self.create=={}:
+            self.api.request('status-set', {"addr": self.addr, "status": data})
+        else:
+            if self.addrkey:
+                self.api.request('she-device-status', {"addr-key": self.addrkey, "status": data})
+            elif self.addr:
+                self.api.request('she-device-status', {"addr": self.addr, "status": data})
 
     def loop(self):
         while True:

@@ -8,14 +8,15 @@ from api import api
 from api import watcher
 
 class device(object):
-    def __init__(self, addr=None, addrkey=None, create={}, threaded=True):
+    def __init__(self, addr=None, addrkey=None, create={}, threaded=True, onStatus=None, onConnect=None):
         self.api = api.api_class
         self.log = api.api_class.log
         self.addr = addr
         self.addrkey = addrkey
         self.create = create
         self.threaded = threaded
-        self.statusCB = None
+        self.statusCB = onStatus
+        self.connectCB = onConnect
         if self.threaded:
             self.q = queue.Queue(10)
             self.thread = threading.Thread(target=self.loop, args=())
@@ -36,7 +37,8 @@ class device(object):
         self.onConnect()
 
     def onConnect(self):
-        self.log.log("API connected")
+        if self.connectCB:
+            self.connectCB()
 
     def _onCreate(self, data):
         if 'addr' in data:
@@ -56,7 +58,7 @@ class device(object):
         self.statusCB = cb
 
     def onStatus(self, data):
-        self.log.log("Received status: {}".format(data))
+        #self.log.log("Received status: {}".format(data))
         if self.statusCB:
             return self.statusCB(data)
         return True

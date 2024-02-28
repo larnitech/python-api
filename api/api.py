@@ -5,6 +5,8 @@ import os
 import socket
 import struct
 import json
+import xml.etree.ElementTree as ET
+
 from api import log
 from api import watcher
 
@@ -12,7 +14,7 @@ api_class = None
 REGISTER_DELAY = 1
 
 class APIThread(object):
-    def __init__(self, host=None, port=None, key=None, name=None, timeout=3, onConnect=None, callBack=None, debug=False):
+    def __init__(self, host=None, port=None, key=None, name=None, timeout=3, onConnect=None, callBack=None, debug=False, apiPath=None):
         global api_class
         api_class = self
         self.log = log.LogThread()
@@ -26,6 +28,7 @@ class APIThread(object):
         self.dbg = debug
         self.timeout = timeout
         self.cb = [callBack] if callBack else []
+        self.xmlCB = []
         self.connect_cb = [onConnect] if onConnect else []
         self.connected = False
         self.addrs = {}
@@ -35,6 +38,19 @@ class APIThread(object):
         self.subs = []
         self.tsubs = 0
         self.subsDevs = {}
+        self.xml = None
+        self.xmlRoot = None
+
+        if apiPath:
+            if apiPath[0]=='/': # UnixSocket
+                self.host = apiPath
+            else:
+                tmp = apiPath.split(':')
+                self.host = tmp[0]
+                if len(tmp)>1:
+                    self.port = int(tmp[1])
+                if len(tmp)>2:
+                    self.key = tmp[2]
 
         self.thread = threading.Thread(target=self.run, args=())
         self.thread.daemon = True
@@ -98,12 +114,15 @@ class APIThread(object):
     def subscribe(self, addr, c, delay=1):
         if self.subs == []:
             self.tsubs = time.monotonic()+delay
-        self.subs.append(addr)
-        self.subsDevs[addr] = c
+        if addr not in self.subs:
+            self.subs.append(addr)
+        if addr not in self.subsDevs:
+            self.subsDevs[addr] = [c]
+        elif c not in self.subsDevs[addr]:
+            self.subsDevs[addr].append(c)
 
     def subscribe_commit(self):
         self.request('status-subscribe', {"status":"detailed", 'addr':self.subs})
-        self.subs = []
         self.tsubs = 0
 
     def register_commit(self):
@@ -114,7 +133,7 @@ class APIThread(object):
 
     def request(self, type, param=None, auth=0):
         if not self.sock or (not auth and not self.connected):
-            self.log.log("Request error. API not connected", "RED")
+            self.log.log(f"Request error. API not connected: {type}", "RED")
             return False
         q = {'request':type}
         if param:
@@ -123,8 +142,8 @@ class APIThread(object):
             self.log.log("Request: {}".format(q))
         return self.send(q)
 
-    def setCallback(self, cb):
-        self.cb.append(cb)
+    def setCallback(self, cb, type=None):
+        self.cb.append({'cb':cb, 'type':type})
 
     def reconnect(self):
         self.connected = False
@@ -135,7 +154,7 @@ class APIThread(object):
         if cb not in self.connect_cb:
             self.connect_cb.append(cb)
         if self.connected:
-                cb()
+            cb()
 
     def read(self, auth=0):
         if not self.sock or (not auth and not self.connected):
@@ -155,7 +174,7 @@ class APIThread(object):
             try:
                 if data[:5] == b'<?xml':
                     self.xmlReceived(data)
-                    return False, None
+                    return True, None
                 elif data[:6] == b'-JSON-':
                     res = json.loads(data[6:].decode())
                 else:
@@ -174,6 +193,45 @@ class APIThread(object):
 
     def xmlReceived(self, xml):
         self.log.log("XML Received")
+        self.xml = xml
+        for cb in self.xmlCB:
+            cb(xml)
+
+    def setXMLcb(self, cb):
+        if cb not in self.xmlCB:
+            if self.xmlCB == []:
+                self.xmlCB.append(cb)
+                if self.connected:
+                    self.request('logic-subscribe')
+            else:
+                self.xmlCB.append(cb)
+
+    def _onXML(self, data):
+        if self.xmlRoot:
+            del self.xmlRoot
+            self.xmlRoot = None
+
+    def getXMLRoot(self):
+        self.setXMLcb(self._onXML)
+        if not self.xml:
+            for i in range(round(timeout*10)):
+                time.sleep(0.1)
+                if self.xml:
+                    break
+        if not self.xmlRoot and self.xml:
+            self.log.log("Parsing XML")
+            parser = ET.XMLParser(encoding="utf-8")
+            self.xmlRoot = ET.fromstring(self.xml.decode().replace("&", ''), parser=parser)
+            self.parent_map = {c: p for p in self.xmlRoot.iter() for c in p}
+            return self.xmlRoot
+        return None
+
+    def getItem(self, addr, timeout=1):
+        self.getXMLRoot()
+        if not self.xmlRoot:
+            return None
+        i=self.xmlRoot.findall('.//item[@addr="{}"]'.format(addr))
+        return None if i==[] else i[0].attrib
 
     def onReceive(self, data):
         if 'event' in data and data['event']=='she-device-is-created':
@@ -193,13 +251,23 @@ class APIThread(object):
         elif self.subsDevs and (('response' in data and data['response'] == 'status-subscribe') or ('event' in data and data['event'] == 'statuses')) and 'devices' in data:
             for d in data['devices']:
                 if 'addr' in d and d['addr'] in self.subsDevs:
-                    self.subsDevs[d['addr']]._onStatus(d)
+                    for cb in self.subsDevs[d['addr']]:
+                        cb._onStatus(d)
 
         if self.cb!=[]:
             for cb in self.cb:
-                ret = cb(data)
-                if type(ret).__name__ == 'dict':
-                    self.send(ret)
+                if not cb['type'] or ('request' in data and data['request']==cb['type']) or ('event' in data and data['event']==cb['type']):
+                    ret = cb['cb'](data)
+                    if type(ret).__name__ == 'dict':
+                        self.send(ret)
+
+    def _onConnect(self):
+        if self.name:
+            self.request('setup', {"appId": self.name})
+        if self.xmlCB != []:
+            self.request('logic-subscribe')
+        self.subscribe_commit()
+        self.register_commit()
 
     def connect(self):
         host = None
@@ -253,8 +321,7 @@ class APIThread(object):
                 if 'result' in js and js['result'] == 'success':
                     self.log.log('API connected and authorized', 'GREEN')
                     self.connected = True
-                    if self.name:
-                        self.request('setup', {"appId": self.name})
+                    self._onConnect()
                     return True
                 else:
                     self.log.log('API: auth response error: {}'.format(js), 'GREEN')
@@ -266,6 +333,22 @@ class APIThread(object):
                 del self.sock
                 self.sock = None
                 return False
+
+    def setStatus(self, addr, data):
+        if type(data).__name__ == 'bytes':
+            hex = '0x' + data.hex()
+        elif type(data).__name__ == 'str':
+            hex = '0x' + data.encode().hex()
+        elif type(data).__name__ == 'dict':
+            hex = data
+        else:
+            self.log.log("setStatus Incorrect data type. Expected bytes/str/dict", "RED")
+            return False
+        self.request('status-set', {"addr": addr, "status": hex})
+
+    def setHW(self, addr, hw):
+        hex = f"{addr} {hw}".encode().hex()
+        self.request('status-set', {"addr": "1000:15", "status": hex})
 
     def run(self):
         self.abort = False

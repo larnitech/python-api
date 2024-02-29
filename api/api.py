@@ -27,7 +27,7 @@ class APIThread(object):
         self.name = name
         self.dbg = debug
         self.timeout = timeout
-        self.cb = [callBack] if callBack else []
+        self.cb = [{'cb':callBack, 'type':None}] if callBack else []
         self.xmlCB = []
         self.connect_cb = [onConnect] if onConnect else []
         self.connected = False

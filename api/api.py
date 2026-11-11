@@ -40,6 +40,7 @@ class APIThread(object):
         self.subsDevs = {}
         self.xml = None
         self.xmlRoot = None
+        self.sendLock = threading.Lock()  # devices send from their own threads
 
         if apiPath:
             if apiPath[0]=='/': # UnixSocket
@@ -65,18 +66,12 @@ class APIThread(object):
         if self.dbg:
             self.log.log("API sending: {}".format(d))
         data = struct.pack("I", len(d)) + d;
-        size = 0
-        while size<len(data):
+        with self.sendLock:
             try:
-                ret = self.sock.send(data[size:])
+                self.sock.sendall(data)
             except Exception as err:
                 self.log.log("Error sending data to socket: {}".format(err), 'RED')
                 self.reconnect()
-                return False
-            if ret:
-                size = size + ret
-            else:
-                self.log.log("Error sending data. result: {}".format(ret), "RED")
                 return False
         return True
 
@@ -156,21 +151,39 @@ class APIThread(object):
         if self.connected:
             cb()
 
+    def recvExact(self, size, idle):
+        """Receive exactly size bytes. A timeout before the first byte is passed on when idle is
+        True (nothing arrived); once a frame has started it is read to the end. Raises
+        ConnectionError when the server closes the socket."""
+        data = b''
+        deadline = None
+        while len(data)<size:
+            try:
+                ret = self.sock.recv(size-len(data))
+            except socket.timeout:
+                if idle and not data:
+                    raise
+                if deadline is None:
+                    deadline = time.monotonic() + 30
+                elif time.monotonic() > deadline:
+                    raise ConnectionError("frame incomplete after 30 seconds")
+                continue
+            if not ret:
+                raise ConnectionError("connection closed by server")
+            data = data + ret
+        return data
+
     def read(self, auth=0):
         if not self.sock or (not auth and not self.connected):
             self.log.log("Read error. API not connected", "RED")
             return False, None
-        ret = self.sock.recv(4, socket.MSG_WAITALL)
+        ret = self.recvExact(4, idle=True)
         if len(ret) == 4:
             size = struct.unpack("I", ret)[0]
-            if size>0 and size<256000:
-                data = b''
-                while len(data)<size:
-                    ret = self.sock.recv(size-len(data))
-                    #self.log.log("recv = {}".format(ret))
-                    data = data + ret
-                    time.sleep(0.01)
-            #self.log.log("size = {}".format(size))
+            if size<=0 or size>=256000:
+                self.log.log("Incorrect packet size {}".format(size), 'RED')
+                return False, None
+            data = self.recvExact(size, idle=False)
             try:
                 if data[:5] == b'<?xml':
                     self.xmlReceived(data)
@@ -272,7 +285,7 @@ class APIThread(object):
     def connect(self):
         host = None
         if self.sock:
-            del self.sock
+            self.sock.close()
             self.sock = None
         if self.host:
             host = self.host
@@ -311,7 +324,11 @@ class APIThread(object):
                 self.sock = None
                 return False
             self.request('authorize', {'key':self.key}, auth=True)
-            st, js = self.read(auth=True)
+            try:
+                st, js = self.read(auth=True)
+            except Exception as e:
+                self.log.log("API: Error while receiving auth response: {}".format(e), 'RED')
+                st, js = False, None
             if not st:
                 self.log.log("API: Error while receiving auth response", 'RED')
                 del self.sock
@@ -383,6 +400,10 @@ class APIThread(object):
                     self.connected = False
                     break
                 if st and js:
-                    self.onReceive(js)
+                    try:
+                        self.onReceive(js)
+                    except Exception as err:
+                        # a failing callback must not stop the API thread (the watcher would exit the plugin)
+                        self.log.log("Error processing {}: {}".format(js, err), 'RED')
                 else:
                     time.sleep(0.01)

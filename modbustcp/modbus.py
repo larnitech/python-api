@@ -652,7 +652,16 @@ class ModbusClient:
         if data[-2:] == b'\xcc\x16':
             data = data[:-2]
         try:
-            ret = self._req_pdu(data)
+            try:
+                reused = self.is_open
+                ret = self._req_pdu(data)
+            except ModbusClient._NetworkError as err:
+                if not reused:
+                    raise
+                # many devices close idle connections: open a new one and repeat the request once
+                self.log.log("Connection lost ({}), reconnecting".format(err.message), "YELLOW")
+                self.close()
+                ret = self._req_pdu(data)
             self.log.log("Returned: {}".format(ret))
             self.dev.setStatus(ret+b'\xcc\x16')
         except Exception as err:
@@ -940,9 +949,17 @@ for c in config.split("\n"):
     p = c.strip().split(' ')
     if len(p) == 2:
         if p[0]=='modbus-devices':
-            if not a:
-                a = api.APIThread(name="shsp-modbus-tcp", debug=False)
-            devs[p[1]] = ModbusClient(p[1])
+            # LT Setup writes all devices on one line: host:port:unit,host:port:unit
+            for addrkey in p[1].split(','):
+                addrkey = addrkey.strip()
+                if not addrkey or addrkey in devs:
+                    continue
+                if not a:
+                    a = api.APIThread(name="shsp-modbus-tcp", debug=False)
+                try:
+                    devs[addrkey] = ModbusClient(addrkey)
+                except Exception as e:
+                    print("Skipping modbus device {}: {}".format(addrkey, e))
 
 while True:
     time.sleep(1)

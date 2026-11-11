@@ -50,7 +50,11 @@ class device(object):
 
     def _onStatus(self, data):
         if self.threaded:
-            self.q.put(data, block=True, timeout=0.1)
+            try:
+                self.q.put(data, block=True, timeout=0.1)
+            except queue.Full:
+                # the device is slower than the requests: drop this one instead of raising in the API thread
+                self.log.log("Device {} is busy, request dropped: {}".format(self.addrkey or self.addr, data), "RED")
         else:
             self.onStatus(data)
 
@@ -79,4 +83,8 @@ class device(object):
         while True:
             ret = self.q.get(block=True, timeout=None)
             if ret:
-                self.onStatus(ret)
+                try:
+                    self.onStatus(ret)
+                except Exception as err:
+                    # keep the device thread alive: the watcher exits the plugin when it dies
+                    self.log.log("Error processing status {}: {}".format(ret, err), "RED")
